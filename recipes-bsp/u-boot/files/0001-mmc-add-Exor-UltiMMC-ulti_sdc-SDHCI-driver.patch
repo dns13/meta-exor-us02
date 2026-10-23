@@ -1,0 +1,183 @@
+From c11719cc0ded8549f72c033747525c429d777b75 Mon Sep 17 00:00:00 2001
+From: Jan Schoeppach <jan.schoeppach@metax-gmbh.de>
+Date: Fri, 23 Oct 2026 11:18:49 +0200
+Subject: [PATCH 1/2] mmc: add Exor UltiMMC (ulti_sdc) SDHCI driver
+
+The Exor uSOM02 module (Cyclone V SoC) connects its SD card slot to an
+SDHCI soft-IP core in the FPGA. The core uses a standard SDHCI register
+set with every register offset shifted left by 4 bits.
+
+Ported from the Exor U-Boot 2013 driver to driver model.
+
+Upstream-Status: Inappropriate [board specific, Exor uSOM02 / BeMoS]
+---
+ drivers/mmc/Kconfig         |   8 +++
+ drivers/mmc/Makefile        |   1 +
+ drivers/mmc/ultisdc_sdhci.c | 127 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 136 insertions(+)
+ create mode 100644 drivers/mmc/ultisdc_sdhci.c
+
+diff --git a/drivers/mmc/Kconfig b/drivers/mmc/Kconfig
+index 6c513328de2..347af3f963e 100644
+--- a/drivers/mmc/Kconfig
++++ b/drivers/mmc/Kconfig
+@@ -599,6 +599,14 @@ config MMC_SDHCI_BCMSTB
+ 
+ 	  If unsure, say N.
+ 
++config MMC_SDHCI_ULTISDC
++	bool "SDHCI support for the Exor UltiMMC FPGA core"
++	depends on MMC_SDHCI && ARCH_SOCFPGA
++	select MMC_SDHCI_IO_ACCESSORS
++	help
++	  Support for the Exor UltiMMC (ulti_sdc) SD card controller, an
++	  SDHCI soft-IP core in the FPGA of the Exor uSOM02 module.
++
+ config MMC_SDHCI_CADENCE
+ 	bool "SDHCI support for the Cadence SD/SDIO/eMMC controller"
+ 	depends on MMC_SDHCI
+diff --git a/drivers/mmc/Makefile b/drivers/mmc/Makefile
+index a23336d7d8d..17cee54afd4 100644
+--- a/drivers/mmc/Makefile
++++ b/drivers/mmc/Makefile
+@@ -72,6 +72,7 @@ obj-$(CONFIG_MMC_SDHCI_ADI)		+= adi_sdhci.o
+ obj-$(CONFIG_MMC_SDHCI_S5P)		+= s5p_sdhci.o
+ obj-$(CONFIG_MMC_SDHCI_SNPS)		+= snps_sdhci.o
+ obj-$(CONFIG_MMC_SDHCI_STI)		+= sti_sdhci.o
++obj-$(CONFIG_MMC_SDHCI_ULTISDC)		+= ultisdc_sdhci.o
+ obj-$(CONFIG_MMC_SDHCI_TANGIER)		+= tangier_sdhci.o
+ obj-$(CONFIG_MMC_SDHCI_TEGRA)		+= tegra_mmc.o
+ obj-$(CONFIG_MMC_SDHCI_XENON)		+= xenon_sdhci.o
+diff --git a/drivers/mmc/ultisdc_sdhci.c b/drivers/mmc/ultisdc_sdhci.c
+new file mode 100644
+index 00000000000..95a628853a4
+--- /dev/null
++++ b/drivers/mmc/ultisdc_sdhci.c
+@@ -0,0 +1,127 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * SDHCI support for the Exor UltiMMC (ulti_sdc) soft-IP core on the
++ * Cyclone V FPGA of the Exor uSOM02 module.
++ *
++ * Based on the Exor U-Boot driver by Giovanni Pavoni, Exor s.p.a.
++ *
++ * The core implements a standard SDHCI register set, but every register
++ * offset is shifted left by 4 bits, so all accesses go through custom
++ * I/O accessors.
++ */
++
++#include <dm.h>
++#include <sdhci.h>
++#include <asm/io.h>
++
++/* The original driver used a fixed 50 MHz base clock */
++#define ULTISDC_MAX_CLK		50000000
++#define ULTISDC_MIN_CLK		400000
++
++#define ULTISDC_REG(reg)	((reg) << 4)
++
++struct ultisdc_plat {
++	struct mmc_config cfg;
++	struct mmc mmc;
++};
++
++static u32 ultisdc_readl(struct sdhci_host *host, int reg)
++{
++	return readl(host->ioaddr + ULTISDC_REG(reg));
++}
++
++static u16 ultisdc_readw(struct sdhci_host *host, int reg)
++{
++	return readw(host->ioaddr + ULTISDC_REG(reg));
++}
++
++static u8 ultisdc_readb(struct sdhci_host *host, int reg)
++{
++	return readb(host->ioaddr + ULTISDC_REG(reg));
++}
++
++static void ultisdc_writel(struct sdhci_host *host, u32 val, int reg)
++{
++	writel(val, host->ioaddr + ULTISDC_REG(reg));
++}
++
++static void ultisdc_writew(struct sdhci_host *host, u16 val, int reg)
++{
++	/* The core does not work with the undivided base clock: force <50 MHz */
++	if (reg == SDHCI_CLOCK_CONTROL &&
++	    ((val >> SDHCI_DIVIDER_SHIFT) & SDHCI_DIV_MASK) < 1)
++		val |= (1 & SDHCI_DIV_MASK) << SDHCI_DIVIDER_SHIFT;
++
++	writew(val, host->ioaddr + ULTISDC_REG(reg));
++}
++
++static void ultisdc_writeb(struct sdhci_host *host, u8 val, int reg)
++{
++	writeb(val, host->ioaddr + ULTISDC_REG(reg));
++}
++
++static const struct sdhci_ops ultisdc_ops = {
++	.read_l		= ultisdc_readl,
++	.read_w		= ultisdc_readw,
++	.read_b		= ultisdc_readb,
++	.write_l	= ultisdc_writel,
++	.write_w	= ultisdc_writew,
++	.write_b	= ultisdc_writeb,
++};
++
++static int ultisdc_bind(struct udevice *dev)
++{
++	struct ultisdc_plat *plat = dev_get_plat(dev);
++
++	return sdhci_bind(dev, &plat->mmc, &plat->cfg);
++}
++
++static int ultisdc_probe(struct udevice *dev)
++{
++	struct mmc_uclass_priv *upriv = dev_get_uclass_priv(dev);
++	struct ultisdc_plat *plat = dev_get_plat(dev);
++	struct sdhci_host *host = dev_get_priv(dev);
++	int ret;
++
++	host->name = dev->name;
++	host->ioaddr = dev_read_addr_ptr(dev);
++	if (!host->ioaddr)
++		return -EINVAL;
++
++	host->quirks = SDHCI_QUIRK_NO_HISPD_BIT;
++	host->max_clk = ULTISDC_MAX_CLK;
++	host->ops = &ultisdc_ops;
++	host->mmc = &plat->mmc;
++	host->mmc->dev = dev;
++	host->mmc->priv = host;
++
++	ret = mmc_of_parse(dev, &plat->cfg);
++	if (ret)
++		return ret;
++
++	ret = sdhci_setup_cfg(&plat->cfg, host, ULTISDC_MAX_CLK,
++			      ULTISDC_MIN_CLK);
++	if (ret)
++		return ret;
++
++	upriv->mmc = host->mmc;
++
++	return sdhci_probe(dev);
++}
++
++static const struct udevice_id ultisdc_ids[] = {
++	{ .compatible = "exor,ulti_sdc-1.0" },
++	{ .compatible = "sdhci-ultimmc" },
++	{ }
++};
++
++U_BOOT_DRIVER(ultisdc_sdhci) = {
++	.name		= "ultisdc_sdhci",
++	.id		= UCLASS_MMC,
++	.of_match	= ultisdc_ids,
++	.ops		= &sdhci_ops,
++	.bind		= ultisdc_bind,
++	.probe		= ultisdc_probe,
++	.priv_auto	= sizeof(struct sdhci_host),
++	.plat_auto	= sizeof(struct ultisdc_plat),
++};

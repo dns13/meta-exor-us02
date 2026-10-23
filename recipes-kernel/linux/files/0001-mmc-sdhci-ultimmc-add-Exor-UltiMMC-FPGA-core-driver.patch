@@ -1,0 +1,172 @@
+From 1037af97f971afea803e0836f5f70275f17669b6 Mon Sep 17 00:00:00 2001
+From: Jan Schoeppach <jan.schoeppach@metax-gmbh.de>
+Date: Fri, 23 Oct 2026 11:37:05 +0200
+Subject: [PATCH 1/2] mmc: sdhci-ultimmc: add Exor UltiMMC FPGA core driver
+
+The Exor uSOM02 module (Cyclone V SoC) connects its SD card slot to an
+SDHCI soft-IP core in the FPGA. The core uses a standard SDHCI register
+set with every register offset shifted left by 4 bits.
+
+Ported from the Exor 4.1 kernel (sdhci-ultimmc.c by Giovanni Pavoni).
+
+Upstream-Status: Inappropriate [board specific, Exor uSOM02 / BeMoS]
+---
+ drivers/mmc/host/Kconfig         |  13 ++++
+ drivers/mmc/host/Makefile        |   1 +
+ drivers/mmc/host/sdhci-ultimmc.c | 108 +++++++++++++++++++++++++++++++
+ 3 files changed, 122 insertions(+)
+ create mode 100644 drivers/mmc/host/sdhci-ultimmc.c
+
+diff --git a/drivers/mmc/host/Kconfig b/drivers/mmc/host/Kconfig
+index c94ae4794545..aa8ab886d330 100644
+--- a/drivers/mmc/host/Kconfig
++++ b/drivers/mmc/host/Kconfig
+@@ -224,6 +224,19 @@ config MMC_SDHCI_OF_ESDHC
+ 
+ 	  If unsure, say N.
+ 
++config MMC_SDHCI_ULTIMMC
++	tristate "SDHCI support for the Exor UltiMMC FPGA core"
++	depends on MMC_SDHCI_PLTFM
++	depends on ARCH_INTEL_SOCFPGA || COMPILE_TEST
++	select MMC_SDHCI_IO_ACCESSORS
++	help
++	  This selects the Exor UltiMMC (ulti_sdc) SD card controller, an
++	  SDHCI soft-IP core in the FPGA of the Exor uSOM02 module.
++
++	  If you have a controller with this interface, say Y or M here.
++
++	  If unsure, say N.
++
+ config MMC_SDHCI_OF_HLWD
+ 	tristate "SDHCI OF support for the Nintendo Wii SDHCI controllers"
+ 	depends on MMC_SDHCI_PLTFM
+diff --git a/drivers/mmc/host/Makefile b/drivers/mmc/host/Makefile
+index 5057fea8afb6..c579e2d2f1b7 100644
+--- a/drivers/mmc/host/Makefile
++++ b/drivers/mmc/host/Makefile
+@@ -88,6 +88,7 @@ obj-$(CONFIG_MMC_SDHCI_OF_ASPEED)	+= sdhci-of-aspeed.o
+ obj-$(CONFIG_MMC_SDHCI_OF_AT91)		+= sdhci-of-at91.o
+ obj-$(CONFIG_MMC_SDHCI_OF_ESDHC)	+= sdhci-of-esdhc.o
+ obj-$(CONFIG_MMC_SDHCI_OF_HLWD)		+= sdhci-of-hlwd.o
++obj-$(CONFIG_MMC_SDHCI_ULTIMMC)		+= sdhci-ultimmc.o
+ obj-$(CONFIG_MMC_SDHCI_OF_DWCMSHC)	+= sdhci-of-dwcmshc.o
+ obj-$(CONFIG_MMC_SDHCI_OF_K1)		+= sdhci-of-k1.o
+ obj-$(CONFIG_MMC_SDHCI_OF_SPARX5)	+= sdhci-of-sparx5.o
+diff --git a/drivers/mmc/host/sdhci-ultimmc.c b/drivers/mmc/host/sdhci-ultimmc.c
+new file mode 100644
+index 000000000000..06eb8eb99400
+--- /dev/null
++++ b/drivers/mmc/host/sdhci-ultimmc.c
+@@ -0,0 +1,108 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SDHCI support for the Exor UltiMMC (ulti_sdc) soft-IP core on the
++ * Cyclone V FPGA of the Exor uSOM02 module.
++ *
++ * Based on the Exor 4.1 driver by Giovanni Pavoni, Exor s.p.a.
++ *
++ * The core implements a standard SDHCI register set, but every register
++ * offset is shifted left by 4 bits, so all accesses go through custom
++ * I/O accessors.
++ */
++
++#include <linux/io.h>
++#include <linux/mmc/host.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#include "sdhci-pltfm.h"
++
++#define ULTIMMC_REG(reg)	((reg) << 4)
++
++static u32 sdhci_ultimmc_readl(struct sdhci_host *host, int reg)
++{
++	return readl(host->ioaddr + ULTIMMC_REG(reg));
++}
++
++static u16 sdhci_ultimmc_readw(struct sdhci_host *host, int reg)
++{
++	return readw(host->ioaddr + ULTIMMC_REG(reg));
++}
++
++static u8 sdhci_ultimmc_readb(struct sdhci_host *host, int reg)
++{
++	return readb(host->ioaddr + ULTIMMC_REG(reg));
++}
++
++static void sdhci_ultimmc_writel(struct sdhci_host *host, u32 val, int reg)
++{
++	writel(val, host->ioaddr + ULTIMMC_REG(reg));
++}
++
++static void sdhci_ultimmc_writew(struct sdhci_host *host, u16 val, int reg)
++{
++	/* The core does not work with the undivided base clock: force <50 MHz */
++	if (reg == SDHCI_CLOCK_CONTROL &&
++	    ((val >> SDHCI_DIVIDER_SHIFT) & SDHCI_DIV_MASK) < 1)
++		val |= (1 & SDHCI_DIV_MASK) << SDHCI_DIVIDER_SHIFT;
++
++	writew(val, host->ioaddr + ULTIMMC_REG(reg));
++}
++
++static void sdhci_ultimmc_writeb(struct sdhci_host *host, u8 val, int reg)
++{
++	writeb(val, host->ioaddr + ULTIMMC_REG(reg));
++}
++
++static const struct sdhci_ops sdhci_ultimmc_ops = {
++	.read_l		= sdhci_ultimmc_readl,
++	.read_w		= sdhci_ultimmc_readw,
++	.read_b		= sdhci_ultimmc_readb,
++	.write_l	= sdhci_ultimmc_writel,
++	.write_w	= sdhci_ultimmc_writew,
++	.write_b	= sdhci_ultimmc_writeb,
++	.set_clock	= sdhci_set_clock,
++	.set_bus_width	= sdhci_set_bus_width,
++	.reset		= sdhci_reset,
++	.set_uhs_signaling = sdhci_set_uhs_signaling,
++};
++
++static const struct sdhci_pltfm_data sdhci_ultimmc_pdata = {
++	.ops	= &sdhci_ultimmc_ops,
++	/* Same quirks as the original Exor driver (PIO only, no DMA) */
++	.quirks	= SDHCI_QUIRK_NO_SIMULT_VDD_AND_POWER |
++		  SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
++		  SDHCI_QUIRK_DELAY_AFTER_POWER |
++		  SDHCI_QUIRK_NO_HISPD_BIT |
++		  SDHCI_QUIRK_BROKEN_DMA |
++		  SDHCI_QUIRK_BROKEN_ADMA,
++};
++
++static int sdhci_ultimmc_probe(struct platform_device *pdev)
++{
++	return sdhci_pltfm_init_and_add_host(pdev, &sdhci_ultimmc_pdata, 0);
++}
++
++static const struct of_device_id sdhci_ultimmc_of_match[] = {
++	{ .compatible = "exor,ulti_sdc-1.0" },
++	{ .compatible = "sdhci-ultimmc" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sdhci_ultimmc_of_match);
++
++static struct platform_driver sdhci_ultimmc_driver = {
++	.driver = {
++		.name		= "sdhci-ultimmc",
++		.of_match_table	= sdhci_ultimmc_of_match,
++		.pm		= &sdhci_pltfm_pmops,
++	},
++	.probe	= sdhci_ultimmc_probe,
++	.remove	= sdhci_pltfm_remove,
++};
++
++module_platform_driver(sdhci_ultimmc_driver);
++
++MODULE_DESCRIPTION("SDHCI driver for the Exor UltiMMC FPGA core");
++MODULE_AUTHOR("Giovanni Pavoni, Exor s.p.a.");
++MODULE_LICENSE("GPL");
+-- 
+2.53.0
+

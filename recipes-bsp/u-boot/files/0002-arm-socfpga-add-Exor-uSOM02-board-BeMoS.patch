@@ -1,0 +1,1460 @@
+From 36d8179c3a66f1c3fe1a74e48521e4bc5db0ef89 Mon Sep 17 00:00:00 2001
+From: Jan Schoeppach <jan.schoeppach@metax-gmbh.de>
+Date: Fri, 23 Oct 2026 11:20:05 +0200
+Subject: [PATCH 2/2] arm: socfpga: add Exor uSOM02 board (BeMoS)
+
+U-Boot proper for the Exor uSOM02 module (Cyclone V SoC) on the BeMoS
+carrier board. The Exor preloader stays in place, so the SPL is not
+built. The environment location, size and variables are compatible
+with the old Exor based U-Boot, so existing devices and the fw_setenv
+based tooling keep working:
+- env in eMMC user area at 0x200, size 0x1000
+- mmc 0 = eMMC, mmc 1 = SD card (ulti_sdc in the FPGA)
+
+Board specifics:
+- release the HPS<->FPGA bridges after arch_early_init_r(), the SD
+  card controller sits in the FPGA
+- PHY setup as done by the Exor U-Boot (reg 0x17 = 0xb302)
+
+Upstream-Status: Inappropriate [board specific, Exor uSOM02 / BeMoS]
+---
+ arch/arm/dts/Makefile                         |   1 +
+ .../dts/socfpga_cyclone5_usom02-u-boot.dtsi   |  31 +
+ arch/arm/dts/socfpga_cyclone5_usom02.dts      |  86 +++
+ arch/arm/mach-socfpga/Kconfig                 |   7 +
+ board/exor/usom02/MAINTAINERS                 |   7 +
+ board/exor/usom02/Makefile                    |   3 +
+ board/exor/usom02/qts/iocsr_config.h          | 659 ++++++++++++++++++
+ board/exor/usom02/qts/pinmux_config.h         | 218 ++++++
+ board/exor/usom02/qts/pll_config.h            |  90 +++
+ board/exor/usom02/usom02.c                    |  69 ++
+ configs/socfpga_usom02_defconfig              |  74 ++
+ include/configs/socfpga_usom02.h              |  68 ++
+ 12 files changed, 1313 insertions(+)
+ create mode 100644 arch/arm/dts/socfpga_cyclone5_usom02-u-boot.dtsi
+ create mode 100644 arch/arm/dts/socfpga_cyclone5_usom02.dts
+ create mode 100644 board/exor/usom02/MAINTAINERS
+ create mode 100644 board/exor/usom02/Makefile
+ create mode 100644 board/exor/usom02/qts/iocsr_config.h
+ create mode 100644 board/exor/usom02/qts/pinmux_config.h
+ create mode 100644 board/exor/usom02/qts/pll_config.h
+ create mode 100644 board/exor/usom02/usom02.c
+ create mode 100644 configs/socfpga_usom02_defconfig
+ create mode 100644 include/configs/socfpga_usom02.h
+
+diff --git a/arch/arm/dts/Makefile b/arch/arm/dts/Makefile
+index 2b65cd9105c..dacf62c3dcb 100644
+--- a/arch/arm/dts/Makefile
++++ b/arch/arm/dts/Makefile
+@@ -436,6 +436,7 @@ dtb-$(CONFIG_ARCH_SOCFPGA) +=				\
+ 	socfpga_arria10_socdk_sdmmc.dtb			\
+ 	socfpga_cyclone5_mcvevk.dtb			\
+ 	socfpga_cyclone5_is1.dtb			\
++	socfpga_cyclone5_usom02.dtb			\
+ 	socfpga_cyclone5_socdk.dtb			\
+ 	socfpga_cyclone5_dbm_soc1.dtb			\
+ 	socfpga_cyclone5_de0_nano_soc.dtb		\
+diff --git a/arch/arm/dts/socfpga_cyclone5_usom02-u-boot.dtsi b/arch/arm/dts/socfpga_cyclone5_usom02-u-boot.dtsi
+new file mode 100644
+index 00000000000..75fc968c854
+--- /dev/null
++++ b/arch/arm/dts/socfpga_cyclone5_usom02-u-boot.dtsi
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * U-Boot additions for the Exor uSOM02
++ */
++
++#include "socfpga-common-u-boot.dtsi"
++
++&watchdog0 {
++	status = "disabled";
++};
++
++&mmc {
++	bootph-all;
++};
++
++&uart0 {
++	clock-frequency = <100000000>;
++	bootph-all;
++};
++
++&porta {
++	bank-name = "porta";
++};
++
++&portb {
++	bank-name = "portb";
++};
++
++&portc {
++	bank-name = "portc";
++};
+diff --git a/arch/arm/dts/socfpga_cyclone5_usom02.dts b/arch/arm/dts/socfpga_cyclone5_usom02.dts
+new file mode 100644
+index 00000000000..18fefb55e62
+--- /dev/null
++++ b/arch/arm/dts/socfpga_cyclone5_usom02.dts
+@@ -0,0 +1,86 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Exor uSOM02 (Cyclone V SoC) on the BeMoS carrier board
++ */
++
++#include "socfpga_cyclone5.dtsi"
++
++/ {
++	model = "Exor uSOM02 BeMoS";
++	compatible = "exor,usom02", "altr,socfpga-cyclone5", "altr,socfpga";
++
++	chosen {
++		stdout-path = "serial0:115200n8";
++	};
++
++	memory@0 {
++		name = "memory";
++		device_type = "memory";
++		reg = <0x0 0x40000000>; /* 1GB */
++	};
++
++	aliases {
++		ethernet0 = &gmac0;
++		/* numbering as in the old BSP: mmc 0 = eMMC, mmc 1 = SD card */
++		mmc0 = &mmc;
++		mmc1 = &ulti_sdc;
++	};
++
++	regulator_3_3v: 3-3-v-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "3.3V";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++	};
++
++	soc {
++		/* SD card controller in the FPGA, behind the lightweight bridge */
++		ulti_sdc: mmc@ff230000 {
++			compatible = "exor,ulti_sdc-1.0", "sdhci-ultimmc";
++			reg = <0xff230000 0x10000>;
++			interrupts = <0 43 4>;
++			bus-width = <4>;
++		};
++	};
++};
++
++/* EMAC0 is routed through the FPGA (MII), PHY at address 0 */
++&gmac0 {
++	phy-mode = "mii";
++	status = "okay";
++};
++
++&gpio0 {
++	status = "okay";
++};
++
++&gpio1 {
++	status = "okay";
++};
++
++&gpio2 {
++	status = "okay";
++};
++
++&i2c0 {
++	status = "okay";
++	clock-frequency = <100000>;
++};
++
++/* eMMC on the module */
++&mmc {
++	vmmc-supply = <&regulator_3_3v>;
++	vqmmc-supply = <&regulator_3_3v>;
++	bus-width = <4>;
++	non-removable;
++	cap-mmc-highspeed;
++	status = "okay";
++};
++
++&uart0 {
++	status = "okay";
++};
++
++&usb1 {
++	status = "okay";
++};
+diff --git a/arch/arm/mach-socfpga/Kconfig b/arch/arm/mach-socfpga/Kconfig
+index fb98b647442..997b9393287 100644
+--- a/arch/arm/mach-socfpga/Kconfig
++++ b/arch/arm/mach-socfpga/Kconfig
+@@ -195,6 +195,10 @@ config TARGET_SOCFPGA_DEVBOARDS_DBM_SOC1
+ 	bool "Devboards DBM-SoC1 (Cyclone V)"
+ 	select ARCH_SOCFPGA_CYCLONE5
+ 
++config TARGET_SOCFPGA_EXOR_USOM02
++	bool "Exor uSOM02 (Cyclone V)"
++	select ARCH_SOCFPGA_CYCLONE5
++
+ config TARGET_SOCFPGA_EBV_SOCRATES
+ 	bool "EBV SoCrates (Cyclone V)"
+ 	select ARCH_SOCFPGA_CYCLONE5
+@@ -260,6 +264,7 @@ config SYS_BOARD
+ 	default "de10-nano" if TARGET_SOCFPGA_TERASIC_DE10_NANO
+ 	default "de10-standard" if TARGET_SOCFPGA_TERASIC_DE10_STANDARD
+ 	default "is1" if TARGET_SOCFPGA_IS1
++	default "usom02" if TARGET_SOCFPGA_EXOR_USOM02
+ 	default "mcvevk" if TARGET_SOCFPGA_ARIES_MCVEVK
+ 	default "n5x-socdk" if TARGET_SOCFPGA_N5X_SOCDK
+ 	default "secu1" if TARGET_SOCFPGA_ARRIA5_SECU1
+@@ -283,6 +288,7 @@ config SYS_VENDOR
+ 	default "aries" if TARGET_SOCFPGA_ARIES_MCVEVK
+ 	default "devboards" if TARGET_SOCFPGA_DEVBOARDS_DBM_SOC1
+ 	default "ebv" if TARGET_SOCFPGA_EBV_SOCRATES
++	default "exor" if TARGET_SOCFPGA_EXOR_USOM02
+ 	default "google" if TARGET_SOCFPGA_CHAMELEONV3
+ 	default "keymile" if TARGET_SOCFPGA_ARRIA5_SECU1
+ 	default "softing" if TARGET_SOCFPGA_SOFTING_VINING_FPGA
+@@ -312,6 +318,7 @@ config SYS_CONFIG_NAME
+ 	default "socfpga_de10_nano" if TARGET_SOCFPGA_TERASIC_DE10_NANO
+ 	default "socfpga_de10_standard" if TARGET_SOCFPGA_TERASIC_DE10_STANDARD
+ 	default "socfpga_is1" if TARGET_SOCFPGA_IS1
++	default "socfpga_usom02" if TARGET_SOCFPGA_EXOR_USOM02
+ 	default "socfpga_mcvevk" if TARGET_SOCFPGA_ARIES_MCVEVK
+ 	default "socfpga_n5x_socdk" if TARGET_SOCFPGA_N5X_SOCDK
+ 	default "socfpga_sockit" if TARGET_SOCFPGA_TERASIC_SOCKIT
+diff --git a/board/exor/usom02/MAINTAINERS b/board/exor/usom02/MAINTAINERS
+new file mode 100644
+index 00000000000..543b27cb9de
+--- /dev/null
++++ b/board/exor/usom02/MAINTAINERS
+@@ -0,0 +1,7 @@
++EXOR USOM02 BOARD
++M:	Jan Schoeppach <jan.schoeppach@metax-gmbh.de>
++S:	Maintained
++F:	board/exor/usom02/
++F:	include/configs/socfpga_usom02.h
++F:	configs/socfpga_usom02_defconfig
++F:	arch/arm/dts/socfpga_cyclone5_usom02*
+diff --git a/board/exor/usom02/Makefile b/board/exor/usom02/Makefile
+new file mode 100644
+index 00000000000..2dc73fd7164
+--- /dev/null
++++ b/board/exor/usom02/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0+
++
++obj-y	:= usom02.o
+diff --git a/board/exor/usom02/qts/iocsr_config.h b/board/exor/usom02/qts/iocsr_config.h
+new file mode 100644
+index 00000000000..a7e53102217
+--- /dev/null
++++ b/board/exor/usom02/qts/iocsr_config.h
+@@ -0,0 +1,659 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/*
++ * Altera SoCFPGA IOCSR configuration
++ */
++
++#ifndef __SOCFPGA_IOCSR_CONFIG_H__
++#define __SOCFPGA_IOCSR_CONFIG_H__
++
++#define CFG_HPS_IOCSR_SCANCHAIN0_LENGTH	764
++#define CFG_HPS_IOCSR_SCANCHAIN1_LENGTH	1719
++#define CFG_HPS_IOCSR_SCANCHAIN2_LENGTH	955
++#define CFG_HPS_IOCSR_SCANCHAIN3_LENGTH	16766
++
++const unsigned long iocsr_scan_chain0_table[] = {
++	0x00000000,
++	0x00000000,
++	0x0FF00000,
++	0xC0000000,
++	0x0000003F,
++	0x00008000,
++	0x00060180,
++	0x18060000,
++	0x18000000,
++	0x00018060,
++	0x00000000,
++	0x00004000,
++	0x000300C0,
++	0x0C030000,
++	0x0C000000,
++	0x00000030,
++	0x0000C030,
++	0x00002000,
++	0x00018060,
++	0x06018000,
++	0x06000000,
++	0x00000018,
++	0x00006018,
++	0x00001000,
++};
++
++const unsigned long iocsr_scan_chain1_table[] = {
++	0x00100000,
++	0x300C0000,
++	0x300000C0,
++	0x000000C0,
++	0x000300C0,
++	0x00008000,
++	0x00080000,
++	0x20000000,
++	0x00000000,
++	0x00000080,
++	0x00020000,
++	0x00004000,
++	0x000300C0,
++	0x0C030000,
++	0x0C000000,
++	0x00000030,
++	0x0000C030,
++	0x00002000,
++	0x06018060,
++	0x06018000,
++	0x01FE0000,
++	0xF8000000,
++	0x00000007,
++	0x00001000,
++	0x0000C030,
++	0x0300C000,
++	0x03000000,
++	0x0000300C,
++	0x0000300C,
++	0x00000800,
++	0x00006018,
++	0x01806000,
++	0x01800000,
++	0x00000006,
++	0x00001806,
++	0x00000400,
++	0x0000300C,
++	0x00C03000,
++	0x00C00000,
++	0x00000003,
++	0x00000C03,
++	0x00000200,
++	0x00001806,
++	0x00601800,
++	0x80600000,
++	0x80000001,
++	0x00000601,
++	0x00000100,
++	0x00000C03,
++	0x00300C00,
++	0xC0300000,
++	0xC0000000,
++	0x00000300,
++	0x00000080,
++};
++
++const unsigned long iocsr_scan_chain2_table[] = {
++	0x300C0300,
++	0x300C0000,
++	0x0FF00000,
++	0x00000000,
++	0x000300C0,
++	0x00008000,
++	0x18060180,
++	0x00000000,
++	0x00000000,
++	0x00000000,
++	0x06018060,
++	0x00004000,
++	0x200300C0,
++	0x0C030000,
++	0x00000000,
++	0x00000000,
++	0x0000C030,
++	0x00002000,
++	0x00018060,
++	0x00000000,
++	0x06000000,
++	0x00010018,
++	0x01806018,
++	0x00001000,
++	0x0000C030,
++	0x00000000,
++	0x03000000,
++	0x0000000C,
++	0x00C0300C,
++	0x00000800,
++};
++
++const unsigned long iocsr_scan_chain3_table[] = {
++	0x0CC20D80,
++	0x0C3000FF,
++	0x0A804001,
++	0x07900000,
++	0x08020000,
++	0x00100000,
++	0x0A800000,
++	0x07900000,
++	0x08020000,
++	0x00100000,
++	0x20430000,
++	0x0C003001,
++	0x00C00481,
++	0x00000000,
++	0x00000021,
++	0x82000004,
++	0x05400000,
++	0x03C80000,
++	0x04010000,
++	0x00080000,
++	0x05400000,
++	0x03C80000,
++	0x05400000,
++	0x03C80000,
++	0x90218000,
++	0x86001800,
++	0x00600240,
++	0x80090218,
++	0x00000001,
++	0x40000002,
++	0x02A00000,
++	0x01E40000,
++	0x02A00000,
++	0x01E40000,
++	0x02A00000,
++	0x01E40000,
++	0x02A00000,
++	0x01E40000,
++	0x4810C000,
++	0x43000C00,
++	0x00300120,
++	0xC004810C,
++	0x12043000,
++	0x20000300,
++	0x00040000,
++	0x50670000,
++	0x00000010,
++	0x24590000,
++	0x00001000,
++	0xA0000034,
++	0x0D000001,
++	0x40680208,
++	0x49034051,
++	0x12481A02,
++	0x802080D0,
++	0x34051406,
++	0x01A02490,
++	0x280D0000,
++	0x30C0680A,
++	0x02490340,
++	0xD000001A,
++	0x0680A280,
++	0x10040000,
++	0x00200000,
++	0x10040000,
++	0x00200000,
++	0x15000000,
++	0x0F200000,
++	0x15000000,
++	0x0F200000,
++	0x01FE0000,
++	0x18000000,
++	0x01800902,
++	0x00240860,
++	0x007F8006,
++	0x00000000,
++	0x0A800001,
++	0x07900000,
++	0x0A800000,
++	0x07900000,
++	0x0A800000,
++	0x07900000,
++	0x08020000,
++	0x00100000,
++	0x20430000,
++	0x0C003001,
++	0x00C00481,
++	0x00000FF0,
++	0x4810C000,
++	0x80000C00,
++	0x05400000,
++	0x02480000,
++	0x04000000,
++	0x00080000,
++	0x05400000,
++	0x03C80000,
++	0x05400000,
++	0x03C80000,
++	0x90218000,
++	0x86001800,
++	0x00600240,
++	0x80090218,
++	0x24086001,
++	0x40000600,
++	0x02A00040,
++	0x01E40000,
++	0x02A00000,
++	0x01E40000,
++	0x02A00000,
++	0x01E40000,
++	0x02A00000,
++	0x01E40000,
++	0x4810C000,
++	0x43000C00,
++	0x00300120,
++	0xC004810C,
++	0x12043000,
++	0x20000300,
++	0x00040000,
++	0x50670000,
++	0x00000010,
++	0x24590000,
++	0x00001000,
++	0xA0000034,
++	0x0D000001,
++	0x40680A28,
++	0x41034051,
++	0x02081A00,
++	0x80A280D0,
++	0x34051406,
++	0x01A00040,
++	0x280D0002,
++	0x5140680A,
++	0x02490340,
++	0xD012481A,
++	0x06802080,
++	0x10040000,
++	0x00200000,
++	0x10040000,
++	0x00200000,
++	0x15000000,
++	0x0F200000,
++	0x15000000,
++	0x0F200000,
++	0x01FE0000,
++	0x18000000,
++	0x01800902,
++	0x00240860,
++	0x007F8006,
++	0x00000000,
++	0x99300001,
++	0x34343400,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0x00040100,
++	0x00000800,
++	0x00000000,
++	0x00001208,
++	0x00482000,
++	0x01000000,
++	0x00000000,
++	0x00410482,
++	0x0006A000,
++	0x0001B400,
++	0x00020000,
++	0x00000400,
++	0x0002A000,
++	0x0001E400,
++	0x5506A000,
++	0x00E1D400,
++	0x00000000,
++	0x2043090C,
++	0x00003001,
++	0x90400000,
++	0x00000000,
++	0x2020C243,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x00010040,
++	0x00000200,
++	0x00000000,
++	0x00000482,
++	0x00120800,
++	0x00002000,
++	0x80000000,
++	0x00104120,
++	0x00000200,
++	0xAC0D5F80,
++	0xFFFFFFFF,
++	0x14F3690D,
++	0x1A041414,
++	0x00D00000,
++	0x14864000,
++	0x59647A05,
++	0xD32CA3DE,
++	0xF655551E,
++	0x0354D348,
++	0x821A0000,
++	0x0000D000,
++	0x01040680,
++	0xD659647A,
++	0x1ED32CA3,
++	0x48F65555,
++	0x00034CD3,
++	0x00080200,
++	0x00001000,
++	0x00080200,
++	0x00001000,
++	0x000A8000,
++	0x00075000,
++	0x541A8000,
++	0x03875001,
++	0x10000000,
++	0x00000000,
++	0x0080C000,
++	0x41000000,
++	0x00003FC2,
++	0x00820000,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0x00040100,
++	0x00000800,
++	0x00000000,
++	0x00001208,
++	0x00482000,
++	0x00008000,
++	0x00000000,
++	0x00410482,
++	0x0006A000,
++	0x0001B400,
++	0x00020000,
++	0x00000400,
++	0x00020080,
++	0x00000400,
++	0x5506A000,
++	0x00E1D400,
++	0x00000000,
++	0x0000090C,
++	0x00000010,
++	0x90400000,
++	0x00000000,
++	0x2020C243,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x00015000,
++	0x0000F200,
++	0x00000000,
++	0x00000482,
++	0x86120800,
++	0x00600240,
++	0x80000000,
++	0x00104120,
++	0x00000200,
++	0xAC0D5F80,
++	0xFFFFFFFF,
++	0x14F3690D,
++	0x1A041414,
++	0x00D00000,
++	0x14864000,
++	0x59647A05,
++	0x932CA3DE,
++	0xF659651E,
++	0x034CB2C8,
++	0x821A0186,
++	0x0000D000,
++	0x00000680,
++	0xD659647A,
++	0x1E932CA3,
++	0x48F65965,
++	0x00034CD3,
++	0x00080200,
++	0x00001000,
++	0x00080200,
++	0x00001000,
++	0x000A8000,
++	0x00075000,
++	0x541A8000,
++	0x03875001,
++	0x10000000,
++	0x00000000,
++	0x0080C000,
++	0x41000000,
++	0x04000002,
++	0x00820000,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0x00040100,
++	0x00000800,
++	0x00000000,
++	0x00001208,
++	0x00482000,
++	0x00008000,
++	0x00000000,
++	0x00410482,
++	0x0006A000,
++	0x0001B400,
++	0x00020000,
++	0x00000400,
++	0x0002A000,
++	0x0001E400,
++	0x5506A000,
++	0x00E1D400,
++	0x00000000,
++	0x2043090C,
++	0x00003001,
++	0x90400000,
++	0x00000000,
++	0x2020C243,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x00010040,
++	0x00000200,
++	0x00000000,
++	0x00000482,
++	0x00120800,
++	0x00002000,
++	0x80000000,
++	0x00104120,
++	0x00000200,
++	0xAC0D5F80,
++	0xFFFFFFFF,
++	0x14F3690D,
++	0x1A041414,
++	0x00D00000,
++	0x14864000,
++	0x59647A05,
++	0x932CA3D6,
++	0xF659651E,
++	0x034CB2C8,
++	0x821A0000,
++	0x0000D000,
++	0x00000680,
++	0xD659647A,
++	0x1E932CA3,
++	0x48F65965,
++	0x00034CD3,
++	0x00080200,
++	0x00001000,
++	0x00080200,
++	0x00001000,
++	0x000A8000,
++	0x00075000,
++	0x541A8000,
++	0x03875001,
++	0x10000000,
++	0x00000000,
++	0x0080C000,
++	0x41000000,
++	0x04000002,
++	0x00820000,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0xAA0D4000,
++	0x01C3A800,
++	0x00040100,
++	0x00000800,
++	0x00000000,
++	0x00001208,
++	0x00482000,
++	0x00008000,
++	0x00000000,
++	0x00410482,
++	0x0006A000,
++	0x0001B400,
++	0x00020000,
++	0x00000400,
++	0x00020080,
++	0x00000400,
++	0x5506A000,
++	0x00E1D400,
++	0x00000000,
++	0x0000090C,
++	0x00000010,
++	0x90400000,
++	0x00000000,
++	0x2020C243,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x2A835000,
++	0x0070EA00,
++	0x00010040,
++	0x00000200,
++	0x00000000,
++	0x00000482,
++	0x00120800,
++	0x00400000,
++	0x80000000,
++	0x00104120,
++	0x00000200,
++	0xAC0D5F80,
++	0xFFFFFFFF,
++	0x14F1690D,
++	0x1A041414,
++	0x00D00000,
++	0x04864000,
++	0x69A47A01,
++	0x932CA3DA,
++	0xF659651E,
++	0x03549248,
++	0x821A0000,
++	0x0000D000,
++	0x00000680,
++	0xD659647A,
++	0x1E932CA3,
++	0x48F65965,
++	0x00035492,
++	0x00080200,
++	0x00001000,
++	0x00080200,
++	0x00001000,
++	0x000A8000,
++	0x00075000,
++	0x541A8000,
++	0x03875001,
++	0x10000000,
++	0x00000000,
++	0x0080C000,
++	0x41000000,
++	0x04000002,
++	0x00820000,
++	0x00489800,
++	0x801A1A1A,
++	0x00000200,
++	0x80000004,
++	0x00000200,
++	0x80000004,
++	0x00000200,
++	0x80000004,
++	0x00000200,
++	0x00000004,
++	0x00040000,
++	0x10000000,
++	0x00000000,
++	0x00000040,
++	0x00010000,
++	0x40002000,
++	0x00000100,
++	0x40000002,
++	0x00000100,
++	0x40000002,
++	0x00000100,
++	0x40000002,
++	0x00000100,
++	0x00000002,
++	0x00020000,
++	0x08000000,
++	0x00000000,
++	0x00000020,
++	0x00008000,
++	0x20001000,
++	0x00000080,
++	0x20000001,
++	0x00000080,
++	0x20000001,
++	0x00000080,
++	0x20000001,
++	0x00000080,
++	0x00000001,
++	0x00010000,
++	0x04000000,
++	0x00FF0000,
++	0x00000000,
++	0x00004000,
++	0x00000800,
++	0xC0000001,
++	0x00041419,
++	0x40000000,
++	0x04000816,
++	0x000D0000,
++	0x00006800,
++	0x00000340,
++	0xD000001A,
++	0x06800000,
++	0x00340000,
++	0x0001A000,
++	0x00000D00,
++	0x40000068,
++	0x1A000003,
++	0x00D00000,
++	0x00068000,
++	0x00003400,
++	0x000001A0,
++	0x00000401,
++	0x00000008,
++	0x00000401,
++	0x00000008,
++	0x00000401,
++	0x00000008,
++	0x00000401,
++	0x80000008,
++	0x0000007F,
++	0x20000000,
++	0x00000000,
++	0xE0000080,
++	0x0000001F,
++	0x00004000,
++};
++
++
++#endif /* __SOCFPGA_IOCSR_CONFIG_H__ */
+diff --git a/board/exor/usom02/qts/pinmux_config.h b/board/exor/usom02/qts/pinmux_config.h
+new file mode 100644
+index 00000000000..bd79545add6
+--- /dev/null
++++ b/board/exor/usom02/qts/pinmux_config.h
+@@ -0,0 +1,218 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/*
++ * Altera SoCFPGA PinMux configuration
++ */
++
++#ifndef __SOCFPGA_PINMUX_CONFIG_H__
++#define __SOCFPGA_PINMUX_CONFIG_H__
++
++const u8 sys_mgr_init_table[] = {
++	0, /* EMACIO0 */
++	2, /* EMACIO1 */
++	2, /* EMACIO2 */
++	2, /* EMACIO3 */
++	2, /* EMACIO4 */
++	2, /* EMACIO5 */
++	2, /* EMACIO6 */
++	2, /* EMACIO7 */
++	2, /* EMACIO8 */
++	0, /* EMACIO9 */
++	2, /* EMACIO10 */
++	2, /* EMACIO11 */
++	2, /* EMACIO12 */
++	2, /* EMACIO13 */
++	0, /* EMACIO14 */
++	0, /* EMACIO15 */
++	0, /* EMACIO16 */
++	0, /* EMACIO17 */
++	0, /* EMACIO18 */
++	0, /* EMACIO19 */
++	3, /* FLASHIO0 */
++	0, /* FLASHIO1 */
++	3, /* FLASHIO2 */
++	3, /* FLASHIO3 */
++	0, /* FLASHIO4 */
++	0, /* FLASHIO5 */
++	0, /* FLASHIO6 */
++	0, /* FLASHIO7 */
++	0, /* FLASHIO8 */
++	3, /* FLASHIO9 */
++	3, /* FLASHIO10 */
++	3, /* FLASHIO11 */
++	0, /* GENERALIO0 */
++	1, /* GENERALIO1 */
++	1, /* GENERALIO2 */
++	0, /* GENERALIO3 */
++	0, /* GENERALIO4 */
++	1, /* GENERALIO5 */
++	1, /* GENERALIO6 */
++	1, /* GENERALIO7 */
++	1, /* GENERALIO8 */
++	0, /* GENERALIO9 */
++	0, /* GENERALIO10 */
++	1, /* GENERALIO11 */
++	1, /* GENERALIO12 */
++	2, /* GENERALIO13 */
++	2, /* GENERALIO14 */
++	2, /* GENERALIO15 */
++	2, /* GENERALIO16 */
++	0, /* GENERALIO17 */
++	0, /* GENERALIO18 */
++	0, /* GENERALIO19 */
++	0, /* GENERALIO20 */
++	0, /* GENERALIO21 */
++	0, /* GENERALIO22 */
++	0, /* GENERALIO23 */
++	0, /* GENERALIO24 */
++	0, /* GENERALIO25 */
++	0, /* GENERALIO26 */
++	0, /* GENERALIO27 */
++	0, /* GENERALIO28 */
++	0, /* GENERALIO29 */
++	0, /* GENERALIO30 */
++	0, /* GENERALIO31 */
++	0, /* MIXED1IO0 */
++	0, /* MIXED1IO1 */
++	0, /* MIXED1IO2 */
++	0, /* MIXED1IO3 */
++	0, /* MIXED1IO4 */
++	0, /* MIXED1IO5 */
++	0, /* MIXED1IO6 */
++	0, /* MIXED1IO7 */
++	0, /* MIXED1IO8 */
++	0, /* MIXED1IO9 */
++	0, /* MIXED1IO10 */
++	0, /* MIXED1IO11 */
++	0, /* MIXED1IO12 */
++	0, /* MIXED1IO13 */
++	0, /* MIXED1IO14 */
++	3, /* MIXED1IO15 */
++	3, /* MIXED1IO16 */
++	3, /* MIXED1IO17 */
++	3, /* MIXED1IO18 */
++	3, /* MIXED1IO19 */
++	3, /* MIXED1IO20 */
++	0, /* MIXED1IO21 */
++	0, /* MIXED2IO0 */
++	0, /* MIXED2IO1 */
++	0, /* MIXED2IO2 */
++	0, /* MIXED2IO3 */
++	0, /* MIXED2IO4 */
++	0, /* MIXED2IO5 */
++	0, /* MIXED2IO6 */
++	0, /* MIXED2IO7 */
++	0, /* GPLINMUX48 */
++	0, /* GPLINMUX49 */
++	0, /* GPLINMUX50 */
++	0, /* GPLINMUX51 */
++	0, /* GPLINMUX52 */
++	0, /* GPLINMUX53 */
++	0, /* GPLINMUX54 */
++	0, /* GPLINMUX55 */
++	0, /* GPLINMUX56 */
++	0, /* GPLINMUX57 */
++	0, /* GPLINMUX58 */
++	0, /* GPLINMUX59 */
++	0, /* GPLINMUX60 */
++	0, /* GPLINMUX61 */
++	0, /* GPLINMUX62 */
++	0, /* GPLINMUX63 */
++	0, /* GPLINMUX64 */
++	0, /* GPLINMUX65 */
++	0, /* GPLINMUX66 */
++	0, /* GPLINMUX67 */
++	0, /* GPLINMUX68 */
++	0, /* GPLINMUX69 */
++	0, /* GPLINMUX70 */
++	0, /* GPLMUX0 */
++	1, /* GPLMUX1 */
++	1, /* GPLMUX2 */
++	1, /* GPLMUX3 */
++	1, /* GPLMUX4 */
++	1, /* GPLMUX5 */
++	1, /* GPLMUX6 */
++	1, /* GPLMUX7 */
++	1, /* GPLMUX8 */
++	0, /* GPLMUX9 */
++	1, /* GPLMUX10 */
++	1, /* GPLMUX11 */
++	1, /* GPLMUX12 */
++	1, /* GPLMUX13 */
++	0, /* GPLMUX14 */
++	0, /* GPLMUX15 */
++	0, /* GPLMUX16 */
++	0, /* GPLMUX17 */
++	0, /* GPLMUX18 */
++	0, /* GPLMUX19 */
++	0, /* GPLMUX20 */
++	0, /* GPLMUX21 */
++	0, /* GPLMUX22 */
++	0, /* GPLMUX23 */
++	0, /* GPLMUX24 */
++	0, /* GPLMUX25 */
++	0, /* GPLMUX26 */
++	0, /* GPLMUX27 */
++	0, /* GPLMUX28 */
++	1, /* GPLMUX29 */
++	1, /* GPLMUX30 */
++	1, /* GPLMUX31 */
++	1, /* GPLMUX32 */
++	1, /* GPLMUX33 */
++	1, /* GPLMUX34 */
++	0, /* GPLMUX35 */
++	1, /* GPLMUX36 */
++	0, /* GPLMUX37 */
++	1, /* GPLMUX38 */
++	1, /* GPLMUX39 */
++	1, /* GPLMUX40 */
++	1, /* GPLMUX41 */
++	1, /* GPLMUX42 */
++	1, /* GPLMUX43 */
++	1, /* GPLMUX44 */
++	1, /* GPLMUX45 */
++	1, /* GPLMUX46 */
++	1, /* GPLMUX47 */
++	0, /* GPLMUX48 */
++	1, /* GPLMUX49 */
++	1, /* GPLMUX50 */
++	0, /* GPLMUX51 */
++	0, /* GPLMUX52 */
++	1, /* GPLMUX53 */
++	1, /* GPLMUX54 */
++	1, /* GPLMUX55 */
++	1, /* GPLMUX56 */
++	0, /* GPLMUX57 */
++	0, /* GPLMUX58 */
++	1, /* GPLMUX59 */
++	1, /* GPLMUX60 */
++	1, /* GPLMUX61 */
++	1, /* GPLMUX62 */
++	1, /* GPLMUX63 */
++	1, /* GPLMUX64 */
++	0, /* GPLMUX65 */
++	0, /* GPLMUX66 */
++	1, /* GPLMUX67 */
++	1, /* GPLMUX68 */
++	1, /* GPLMUX69 */
++	1, /* GPLMUX70 */
++	0, /* NANDUSEFPGA */
++	0, /* UART0USEFPGA */
++	1, /* RGMII1USEFPGA */
++	0, /* SPIS0USEFPGA */
++	0, /* CAN0USEFPGA */
++	0, /* I2C0USEFPGA */
++	0, /* SDMMCUSEFPGA */
++	0, /* QSPIUSEFPGA */
++	0, /* SPIS1USEFPGA */
++	1, /* RGMII0USEFPGA */
++	0, /* UART1USEFPGA */
++	0, /* CAN1USEFPGA */
++	0, /* USB1USEFPGA */
++	0, /* I2C3USEFPGA */
++	0, /* I2C2USEFPGA */
++	0, /* I2C1USEFPGA */
++	1, /* SPIM1USEFPGA */
++	0, /* USB0USEFPGA */
++	1 /* SPIM0USEFPGA */
++};
++#endif /* __SOCFPGA_PINMUX_CONFIG_H__ */
+diff --git a/board/exor/usom02/qts/pll_config.h b/board/exor/usom02/qts/pll_config.h
+new file mode 100644
+index 00000000000..ce1c109eb77
+--- /dev/null
++++ b/board/exor/usom02/qts/pll_config.h
+@@ -0,0 +1,90 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/*
++ * Altera SoCFPGA Clock and PLL configuration
++ */
++
++#ifndef __SOCFPGA_PLL_CONFIG_H__
++#define __SOCFPGA_PLL_CONFIG_H__
++
++#define CFG_HPS_DBCTRL_STAYOSC1 1
++
++#define CFG_HPS_MAINPLLGRP_VCO_DENOM 0
++#define CFG_HPS_MAINPLLGRP_VCO_NUMER 63
++#define CFG_HPS_MAINPLLGRP_MPUCLK_CNT 0
++#define CFG_HPS_MAINPLLGRP_MAINCLK_CNT 0
++#define CFG_HPS_MAINPLLGRP_DBGATCLK_CNT 0
++#define CFG_HPS_MAINPLLGRP_MAINQSPICLK_CNT 3
++#define CFG_HPS_MAINPLLGRP_MAINNANDSDMMCCLK_CNT 511
++#define CFG_HPS_MAINPLLGRP_CFGS2FUSER0CLK_CNT 15
++#define CFG_HPS_MAINPLLGRP_MAINDIV_L3MPCLK 1
++#define CFG_HPS_MAINPLLGRP_MAINDIV_L3SPCLK 1
++#define CFG_HPS_MAINPLLGRP_MAINDIV_L4MPCLK 1
++#define CFG_HPS_MAINPLLGRP_MAINDIV_L4SPCLK 1
++#define CFG_HPS_MAINPLLGRP_DBGDIV_DBGATCLK 0
++#define CFG_HPS_MAINPLLGRP_DBGDIV_DBGCLK 1
++#define CFG_HPS_MAINPLLGRP_TRACEDIV_TRACECLK 0
++#define CFG_HPS_MAINPLLGRP_L4SRC_L4MP 1
++#define CFG_HPS_MAINPLLGRP_L4SRC_L4SP 1
++
++#define CFG_HPS_PERPLLGRP_VCO_DENOM 0
++#define CFG_HPS_PERPLLGRP_VCO_NUMER 39
++#define CFG_HPS_PERPLLGRP_VCO_PSRC 0
++#define CFG_HPS_PERPLLGRP_EMAC0CLK_CNT 3
++#define CFG_HPS_PERPLLGRP_EMAC1CLK_CNT 3
++#define CFG_HPS_PERPLLGRP_PERQSPICLK_CNT 511
++#define CFG_HPS_PERPLLGRP_PERNANDSDMMCCLK_CNT 4
++#define CFG_HPS_PERPLLGRP_PERBASECLK_CNT 4
++#define CFG_HPS_PERPLLGRP_S2FUSER1CLK_CNT 511
++#define CFG_HPS_PERPLLGRP_DIV_USBCLK 0
++#define CFG_HPS_PERPLLGRP_DIV_SPIMCLK 0
++#define CFG_HPS_PERPLLGRP_DIV_CAN0CLK 1
++#define CFG_HPS_PERPLLGRP_DIV_CAN1CLK 1
++#define CFG_HPS_PERPLLGRP_GPIODIV_GPIODBCLK 16777215
++#define CFG_HPS_PERPLLGRP_SRC_SDMMC 2
++#define CFG_HPS_PERPLLGRP_SRC_NAND 2
++#define CFG_HPS_PERPLLGRP_SRC_QSPI 1
++
++#define CFG_HPS_SDRPLLGRP_VCO_DENOM 10
++#define CFG_HPS_SDRPLLGRP_VCO_NUMER 292
++#define CFG_HPS_SDRPLLGRP_VCO_SSRC 0
++#define CFG_HPS_SDRPLLGRP_DDRDQSCLK_CNT 1
++#define CFG_HPS_SDRPLLGRP_DDRDQSCLK_PHASE 0
++#define CFG_HPS_SDRPLLGRP_DDR2XDQSCLK_CNT 0
++#define CFG_HPS_SDRPLLGRP_DDR2XDQSCLK_PHASE 0
++#define CFG_HPS_SDRPLLGRP_DDRDQCLK_CNT 1
++#define CFG_HPS_SDRPLLGRP_DDRDQCLK_PHASE 4
++#define CFG_HPS_SDRPLLGRP_S2FUSER2CLK_CNT 5
++#define CFG_HPS_SDRPLLGRP_S2FUSER2CLK_PHASE 0
++
++#define CFG_HPS_CLK_OSC1_HZ 25000000
++#define CFG_HPS_CLK_OSC2_HZ 25000000
++#define CFG_HPS_CLK_F2S_SDR_REF_HZ 0
++#define CFG_HPS_CLK_F2S_PER_REF_HZ 0
++#define CFG_HPS_CLK_MAINVCO_HZ 1600000000
++#define CFG_HPS_CLK_PERVCO_HZ 1000000000
++#define CFG_HPS_CLK_SDRVCO_HZ 665909090
++#define CFG_HPS_CLK_OSC1_HZ 25000000
++#define CFG_HPS_CLK_OSC2_HZ 25000000
++#define CFG_HPS_CLK_F2S_SDR_REF_HZ 0
++#define CFG_HPS_CLK_F2S_PER_REF_HZ 0
++#define CFG_HPS_CLK_MAINVCO_HZ 1600000000
++#define CFG_HPS_CLK_PERVCO_HZ 1000000000
++#define CFG_HPS_CLK_EMAC0_HZ 250000000
++#define CFG_HPS_CLK_EMAC1_HZ 250000000
++#define CFG_HPS_CLK_USBCLK_HZ 200000000
++#define CFG_HPS_CLK_NAND_HZ 50000000
++#define CFG_HPS_CLK_SDMMC_HZ 200000000
++#define CFG_HPS_CLK_QSPI_HZ 400000000
++#define CFG_HPS_CLK_SPIM_HZ 200000000
++#define CFG_HPS_CLK_CAN0_HZ 100000000
++#define CFG_HPS_CLK_CAN1_HZ 100000000
++#define CFG_HPS_CLK_GPIODB_HZ 11
++#define CFG_HPS_CLK_L4_MP_HZ 100000000
++#define CFG_HPS_CLK_L4_SP_HZ 100000000
++
++#define CFG_HPS_ALTERAGRP_MPUCLK 1
++#define CFG_HPS_ALTERAGRP_MAINCLK 3
++#define CFG_HPS_ALTERAGRP_DBGATCLK 3
++
++
++#endif /* __SOCFPGA_PLL_CONFIG_H__ */
+diff --git a/board/exor/usom02/usom02.c b/board/exor/usom02/usom02.c
+new file mode 100644
+index 00000000000..2f36ad4672d
+--- /dev/null
++++ b/board/exor/usom02/usom02.c
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Exor uSOM02 (Cyclone V SoC) on the BeMoS carrier board
++ *
++ * Only U-Boot proper is built for this board. The SPL is the Exor preloader
++ * which stays in place and loads u-boot.img from the SD card (partition type
++ * 0xA2, offset 256 KiB) or the eMMC boot0 partition.
++ */
++
++#include <dm.h>
++#include <init.h>
++#include <lmb.h>
++#include <miiphy.h>
++#include <linux/mii.h>
++#include <linux/sizes.h>
++#include <asm/arch/reset_manager.h>
++
++#define USOM02_PHY_ADDR		0
++
++/*
++ * arch_early_init_r() puts all HPS<->FPGA bridges into reset. On the uSOM02
++ * the SD card controller (ulti_sdc) and the BeMoS IP cores sit behind the
++ * bridges, so release them again before the MMC devices are probed. The FPGA
++ * is configured before the preloader runs.
++ */
++int power_init_board(void)
++{
++	socfpga_bridges_reset(0);
++
++	return 0;
++}
++
++/*
++ * PHY setup as done by the Exor U-Boot (set_phy_params). The old kernel never
++ * wrote to the PHY, so the configuration has to happen in the bootloader on
++ * every boot, independent of any network command.
++ */
++int board_late_init(void)
++{
++	struct udevice *dev;
++	struct mii_dev *bus;
++	int ret;
++
++	/*
++	 * socfpga_cyclone5.dtsi reserves the first 4 KiB (/memreserve/) for the
++	 * Linux CPU1 trampoline, so mainline U-Boot refuses to load files there.
++	 * The Exor environment, still saved on existing devices, loads the
++	 * devicetree to fdtaddr=0x100. bootz relocates the devicetree before
++	 * starting Linux, so the area is free for U-Boot itself.
++	 */
++	lmb_free(0, SZ_4K, LMB_NOOVERWRITE);
++
++	ret = uclass_get_device_by_seq(UCLASS_ETH, 0, &dev);
++	if (ret) {
++		printf("PHY: ethernet device not found (%d)\n", ret);
++		return 0;
++	}
++
++	bus = miiphy_get_dev_by_name(dev->name);
++	if (!bus) {
++		printf("PHY: MDIO bus %s not found\n", dev->name);
++		return 0;
++	}
++
++	bus->write(bus, USOM02_PHY_ADDR, MDIO_DEVAD_NONE, 0x17, 0xb302);
++	bus->write(bus, USOM02_PHY_ADDR, MDIO_DEVAD_NONE, MII_BMCR, 0x1240);
++
++	return 0;
++}
+diff --git a/configs/socfpga_usom02_defconfig b/configs/socfpga_usom02_defconfig
+new file mode 100644
+index 00000000000..d33a05bc6f7
+--- /dev/null
++++ b/configs/socfpga_usom02_defconfig
+@@ -0,0 +1,74 @@
++CONFIG_ARM=y
++CONFIG_SYS_L2_PL310=y
++CONFIG_ARCH_SOCFPGA=y
++CONFIG_SYS_MALLOC_LEN=0x4000000
++CONFIG_HAS_CUSTOM_SYS_INIT_SP_ADDR=y
++CONFIG_CUSTOM_SYS_INIT_SP_ADDR=0x800000
++CONFIG_ENV_SIZE=0x1000
++CONFIG_ENV_OFFSET=0x200
++CONFIG_DM_GPIO=y
++CONFIG_DEFAULT_DEVICE_TREE="socfpga_cyclone5_usom02"
++CONFIG_DM_RESET=y
++CONFIG_TARGET_SOCFPGA_EXOR_USOM02=y
++CONFIG_SYS_LOAD_ADDR=0x8000
++# CONFIG_SPL is not set
++CONFIG_BUILD_TARGET="u-boot.img"
++CONFIG_TIMESTAMP=y
++CONFIG_FIT=y
++CONFIG_BOOTDELAY=3
++CONFIG_USE_BOOTCOMMAND=y
++CONFIG_BOOTCOMMAND="run callscript; run mmcload; run mmcboot"
++CONFIG_USE_BOOTARGS=y
++CONFIG_BOOTARGS="console=ttyS0,115200"
++# CONFIG_BOOTSTD is not set
++CONFIG_SYS_CONSOLE_IS_IN_ENV=y
++CONFIG_SYS_CONSOLE_OVERWRITE_ROUTINE=y
++CONFIG_SYS_CONSOLE_ENV_OVERWRITE=y
++# CONFIG_DISPLAY_BOARDINFO is not set
++CONFIG_DISPLAY_BOARDINFO_LATE=y
++CONFIG_BOARD_LATE_INIT=y
++CONFIG_CLOCKS=y
++CONFIG_SYS_PROMPT="BONE # "
++CONFIG_SYS_MAXARGS=32
++CONFIG_CMD_ASKENV=y
++CONFIG_CMD_GREPENV=y
++CONFIG_CMD_BOOTZ=y
++CONFIG_CMD_GPIO=y
++CONFIG_CMD_I2C=y
++CONFIG_CMD_MMC=y
++CONFIG_CMD_PART=y
++CONFIG_CMD_USB=y
++CONFIG_CMD_DHCP=y
++CONFIG_CMD_MII=y
++CONFIG_CMD_PING=y
++CONFIG_CMD_CACHE=y
++CONFIG_CMD_EXT2=y
++CONFIG_CMD_EXT4=y
++CONFIG_CMD_EXT4_WRITE=y
++CONFIG_CMD_FAT=y
++CONFIG_CMD_FS_GENERIC=y
++CONFIG_ENV_OVERWRITE=y
++CONFIG_ENV_IS_IN_MMC=y
++CONFIG_SYS_MMC_ENV_DEV=0
++CONFIG_SYS_MMC_ENV_PART=0
++CONFIG_ENV_RELOC_GD_ENV_ADDR=y
++CONFIG_VERSION_VARIABLE=y
++CONFIG_DWAPB_GPIO=y
++CONFIG_DM_I2C=y
++CONFIG_SYS_I2C_DW=y
++CONFIG_SYS_MMC_MAX_BLK_COUNT=256
++CONFIG_MMC_DW=y
++CONFIG_MMC_SDHCI=y
++# CONFIG_MMC_SDHCI_SDMA is not set
++CONFIG_MMC_SDHCI_ULTISDC=y
++CONFIG_ETH_DESIGNWARE=y
++CONFIG_MII=y
++CONFIG_USB=y
++CONFIG_USB_DWC2=y
++CONFIG_USB_STORAGE=y
++# CONFIG_WDT is not set
++CONFIG_SYS_TIMER_COUNTS_DOWN=y
++# CONFIG_TOOLS_MKEFICAPSULE is not set
++CONFIG_AUTOBOOT_KEYED=y
++CONFIG_AUTOBOOT_PROMPT="Press Ctrl+C to stop autoboot in %d seconds\n"
++CONFIG_AUTOBOOT_STOP_STR="\x03"
+diff --git a/include/configs/socfpga_usom02.h b/include/configs/socfpga_usom02.h
+new file mode 100644
+index 00000000000..7144ffd20d8
+--- /dev/null
++++ b/include/configs/socfpga_usom02.h
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Exor uSOM02 (Cyclone V SoC) on the BeMoS carrier board
++ */
++#ifndef __CONFIG_SOCFPGA_USOM02_H__
++#define __CONFIG_SOCFPGA_USOM02_H__
++
++#include <asm/arch/base_addr_ac5.h>
++
++/* Memory configurations */
++#define PHYS_SDRAM_1_SIZE		0x40000000	/* 1GiB */
++
++/*
++ * Keep the relocated FDT within the kernel lowmem. The environments stored
++ * on existing devices come from the old U-Boot and have no bootm_size.
++ */
++#define CFG_SYS_BOOTMAPSZ		(64 << 20)
++
++/*
++ * Environment compatible with the Exor based U-Boot of the old BSP. The
++ * variable names are used by fw_setenv in the eMMC init scripts
++ * (mmcroot, mmcload, fdtimage, ethaddr, bootdelay).
++ *   mmc 0 / mmcblk0: eMMC (HPS SD/MMC controller)
++ *   mmc 1 / mmcblk1: SD card (ulti_sdc in the FPGA)
++ */
++#define USOM02_BOOTARGS		"console=ttyS0,115200"
++
++#define CFG_EXTRA_ENV_SETTINGS \
++	/* loadaddr=0x8000 comes from CONFIG_SYS_LOAD_ADDR */ \
++	"verify=n\0" \
++	"fdtaddr=0x00000100\0" \
++	"bootimage=zImage\0" \
++	"fdtimage=socfpga_bemos_v8.dtb\0" \
++	"mmcloadcmd=fatload\0" \
++	"mmcloadpart=1\0" \
++	"mmcroot=/dev/mmcblk1p2\0" \
++	"ramboot=setenv bootargs " USOM02_BOOTARGS ";" \
++		"bootz ${loadaddr} - ${fdtaddr}\0" \
++	"mmcload=mmc rescan;" \
++		"${mmcloadcmd} mmc 1:${mmcloadpart} ${loadaddr} ${bootimage};" \
++		"${mmcloadcmd} mmc 1:${mmcloadpart} ${fdtaddr} ${fdtimage}\0" \
++	"mmcboot=setenv bootargs " USOM02_BOOTARGS \
++		" root=${mmcroot} rw rootwait;" \
++		"bootz ${loadaddr} - ${fdtaddr}\0" \
++	"safeboot=setenv bootargs " USOM02_BOOTARGS \
++		" root=${mmcroot} rw rootwait" \
++		" modprobe.blacklist=bemos_ab;" \
++		"bootz ${loadaddr} - ${fdtaddr}\0" \
++	"repairboot=setenv bootargs " USOM02_BOOTARGS \
++		" root=${mmcroot} ro rootwait" \
++		" fsck.mode=force fsck.repair=yes" \
++		" modprobe.blacklist=bemos_ab;" \
++		"bootz ${loadaddr} - ${fdtaddr}\0" \
++	"netboot=dhcp ${bootimage} ; " \
++		"tftp ${fdtaddr} ${fdtimage} ; run ramboot\0" \
++	"fpgadata=0x2000000\0" \
++	"scriptfile=u-boot.scr\0" \
++	"callscript=if fatload mmc 1:1 $fpgadata $scriptfile;" \
++			"then source $fpgadata; " \
++		"else " \
++			"echo Optional boot script not found. " \
++			"Continuing to boot normally; " \
++		"fi;\0"
++
++/* The rest of the configuration is shared */
++#include <configs/socfpga_common.h>
++
++#endif	/* __CONFIG_SOCFPGA_USOM02_H__ */

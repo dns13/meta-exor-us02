@@ -1,0 +1,12 @@
+# SD card image for the Exor uSOM02 (BeMoS installation medium)
+#
+# p1  FAT   zImage + device trees. Copied 1:1 (dd) to eMMC p1 by the
+#           init scripts, so it must not exceed eMMC p1 (91078 sectors).
+# p2  ext4  root filesystem (mmcroot=/dev/mmcblk1p2)
+# p3  0xA2  u-boot.img at offset 256 KiB, loaded by the Exor preloader and
+#           copied to eMMC boot0 by the init scripts (dd skip=4 bs=64k)
+part --source bootimg_partition --ondisk mmcblk1 --fstype=vfat --label boot --active --align 1024 --fixed-size 44M --system-id 0x0b
+part / --source rootfs --ondisk mmcblk1 --fstype=ext4 --label root --align 1024
+part --source rawcopy --sourceparams="file=u-boot-usom02-a2.bin" --ondisk mmcblk1 --system-id 0xa2 --align 1024 --fixed-size 4M
+
+bootloader --ptable msdos
