@@ -10,8 +10,6 @@ KCONFIG_MODE:usom02 = "alldefconfig"
 
 SRC_URI:append:usom02 = " \
     file://0001-mmc-sdhci-ultimmc-add-Exor-UltiMMC-FPGA-core-driver.patch \
-    file://0002-ARM-dts-socfpga-add-Exor-uSOM02-BeMoS-boards.patch \
+    file://0002-ARM-dts-socfpga-add-Exor-uSOM02-module.patch \
     file://usom02.cfg \
 "
-
-KERNEL_FEATURES:append:usom02 = " cfg/systemd.scc"
